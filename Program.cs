@@ -1,166 +1,148 @@
-﻿
-using System.Diagnostics;
-using System.Net;
-using System.Text;
+﻿using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 
-const string ApiUrl = "https://rc-vault-fap-live-1.azurewebsites.net/api/gettimeentries?code=vO17RnE8vuzXzPJo5eaLLjXjmRW07law99QTD90zat9FfOQJKKUcgQ==";
-const int ThresholdHours = 100;
-const string OutputFile = "employees.html";
+string? url = args.Length > 0 ? args[0] : Environment.GetEnvironmentVariable("TIME_ENTRIES_URL");
+string outputFile = "EmployeeTimeWorked_PieChart.png";
 
-// Get employee time entries from the API
-List<TimeEntry> entries;
-
-try
+string json;
+if (!string.IsNullOrWhiteSpace(url))
 {
-    using var client = new HttpClient();
-    var json = await client.GetStringAsync(ApiUrl);
-
-    entries = JsonSerializer.Deserialize<List<TimeEntry>>(json) ?? new List<TimeEntry>();
-}
-catch (Exception ex)
-{
-    Console.WriteLine("Could not retrieve time entries: " + ex.Message);
-    return 1;
-}
-
-// Calculate total working hours for each employee
-var employeeTotals = entries
-    .Where(e => e.DeletedOn == null &&
-                !string.IsNullOrWhiteSpace(e.EmployeeName) &&
-                e.EndTimeUtc > e.StartTimeUtc)
-    .GroupBy(e => e.EmployeeName.Trim())
-    .Select(group => new
+    try
     {
-        Name = group.Key,
-        TotalHours = group.Sum(e => (e.EndTimeUtc - e.StartTimeUtc).TotalHours)
+        using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
+        json = await http.GetStringAsync(url);
+        Console.WriteLine("Data fetched from REST endpoint.");
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Could not fetch endpoint ({ex.Message}). Using sample data.");
+        json = SampleData.Json;
+    }
+}
+else
+{
+    Console.WriteLine("No endpoint supplied. Using sample data.");
+    json = SampleData.Json;
+}
+
+
+var options = new JsonSerializerOptions { PropertyNameCaseInsensitive = true };
+var entries = JsonSerializer.Deserialize<List<TimeEntry>>(json, options) ?? new();
+
+var totals = entries
+    .Where(e => e.DeletedOn == null
+             && !string.IsNullOrWhiteSpace(e.EmployeeName)
+             && e.EndTimeUtc > e.StarTimeUtc)
+    .GroupBy(e => e.EmployeeName!.Trim(), StringComparer.OrdinalIgnoreCase)
+    .Select(g => new
+    {
+        Name = g.Key,
+        Hours = g.Sum(e => (e.EndTimeUtc - e.StarTimeUtc).TotalHours)
     })
-    .OrderByDescending(e => e.TotalHours)
-    .ThenBy(e => e.Name)
+    .OrderByDescending(x => x.Hours)
     .ToList();
 
-// Create HTML report
-var html = new StringBuilder();
-
-html.AppendLine("<!DOCTYPE html>");
-html.AppendLine("<html lang=\"en\">");
-html.AppendLine("<head>");
-html.AppendLine("<meta charset=\"utf-8\">");
-html.AppendLine("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-html.AppendLine("<title>Employee time worked</title>");
-
-html.AppendLine("""
-<style>
-    body {
-        font-family: Segoe UI, Arial, sans-serif;
-        margin: 2rem;
-        color: #222;
-    }
-
-    table {
-        border-collapse: collapse;
-        min-width: 380px;
-    }
-
-    th, td {
-        padding: .55rem 1rem;
-        border: 1px solid #ccc;
-        text-align: left;
-    }
-
-    th {
-        background: #f0f0f0;
-    }
-
-    td.num {
-        text-align: right;
-        font-variant-numeric: tabular-nums;
-    }
-
-    tr.low {
-        background: #ffd6d6;
-    }
-
-    .legend {
-        margin-top: 1rem;
-        font-size: .9rem;
-    }
-
-    .swatch {
-        display: inline-block;
-        width: 1em;
-        height: 1em;
-        background: #ffd6d6;
-        border: 1px solid #ccc;
-        vertical-align: middle;
-        margin-right: .4em;
-    }
-</style>
-""");
-
-html.AppendLine("</head>");
-html.AppendLine("<body>");
-html.AppendLine("<h1>Employees by total time worked</h1>");
-html.AppendLine("<table>");
-html.AppendLine("<thead><tr><th>Name</th><th>Total time worked</th></tr></thead>");
-html.AppendLine("<tbody>");
-
-// Add each employee to the table
-foreach (var employee in employeeTotals)
+if (totals.Count == 0)
 {
-    string rowClass = employee.TotalHours < ThresholdHours ? " class=\"low\"" : "";
-
-    int hours = (int)employee.TotalHours;
-    int minutes = (int)(employee.TotalHours * 60) % 60;
-
-    string employeeName = WebUtility.HtmlEncode(employee.Name);
-    string totalTime = $"{hours}h {minutes:00}m";
-
-    html.AppendLine(
-        $"<tr{rowClass}><td>{employeeName}</td><td class=\"num\">{totalTime}</td></tr>");
+    Console.WriteLine("No valid time entries found.");
+    return;
 }
 
-html.AppendLine("</tbody>");
-html.AppendLine("</table>");
+double grandTotal = totals.Sum(t => t.Hours);
 
-html.AppendLine(
-    $"<p class=\"legend\"><span class=\"swatch\"></span>Worked less than {ThresholdHours} hours</p>");
 
-html.AppendLine("</body>");
-html.AppendLine("</html>");
-
-// Save the HTML file
-string filePath = Path.GetFullPath(OutputFile);
-
-await File.WriteAllTextAsync(filePath, html.ToString(), new UTF8Encoding(false));
-
-Console.WriteLine($"Created {filePath}");
-
-// Open the report in the default browser
-try
+Color[] palette =
 {
-    Process.Start(new ProcessStartInfo(filePath)
+    Color.FromArgb(66,133,244),  Color.FromArgb(234,67,53),   Color.FromArgb(251,188,5),
+    Color.FromArgb(52,168,83),   Color.FromArgb(171,71,188),  Color.FromArgb(255,112,67),
+    Color.FromArgb(0,172,193),   Color.FromArgb(158,157,36),  Color.FromArgb(92,107,192),
+    Color.FromArgb(141,110,99),  Color.FromArgb(236,64,122),  Color.FromArgb(38,166,154)
+};
+
+int legendRowHeight = 28;
+int width = 1000;
+int height = Math.Max(700, 150 + totals.Count * legendRowHeight + 60);
+
+using var bmp = new Bitmap(width, height);
+using var g = Graphics.FromImage(bmp);
+g.SmoothingMode = SmoothingMode.AntiAlias;
+g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+g.Clear(Color.White);
+
+using var titleFont = new Font("Segoe UI", 20, FontStyle.Bold);
+using var legendFont = new Font("Segoe UI", 11);
+using var subFont = new Font("Segoe UI", 10, FontStyle.Italic);
+
+g.DrawString("Percentage of Total Time Worked by Employee", titleFont, Brushes.Black, 40, 25);
+g.DrawString($"Total hours: {grandTotal:N1}", subFont, Brushes.Gray, 42, 65);
+
+var pieRect = new Rectangle(50, 110, 480, 480);
+float startAngle = -90f;
+
+for (int i = 0; i < totals.Count; i++)
+{
+    float sweep = (float)(totals[i].Hours / grandTotal * 360.0);
+    using var brush = new SolidBrush(palette[i % palette.Length]);
+    g.FillPie(brush, pieRect, startAngle, sweep);
+    using var pen = new Pen(Color.White, 2);
+    g.DrawPie(pen, pieRect, startAngle, sweep);
+
+    
+    double pct = totals[i].Hours / grandTotal * 100;
+    if (pct >= 4)
     {
-        UseShellExecute = true
-    });
-}
-catch
-{
-    // Ignore errors if the browser cannot be opened
+        double mid = (startAngle + sweep / 2) * Math.PI / 180.0;
+        float cx = pieRect.X + pieRect.Width / 2f + (float)(Math.Cos(mid) * pieRect.Width * 0.33);
+        float cy = pieRect.Y + pieRect.Height / 2f + (float)(Math.Sin(mid) * pieRect.Height * 0.33);
+        var label = $"{pct:0.#}%";
+        var size = g.MeasureString(label, legendFont);
+        g.DrawString(label, legendFont, Brushes.White, cx - size.Width / 2, cy - size.Height / 2);
+    }
+    startAngle += sweep;
 }
 
-return 0;
 
-// Employee time entry model
-class TimeEntry
+int lx = 600, ly = 120;
+for (int i = 0; i < totals.Count; i++)
 {
+    double pct = totals[i].Hours / grandTotal * 100;
+    using var brush = new SolidBrush(palette[i % palette.Length]);
+    g.FillRectangle(brush, lx, ly + i * legendRowHeight, 18, 18);
+    g.DrawString($"{totals[i].Name} - {pct:0.0}% ({totals[i].Hours:N1} h)",
+                 legendFont, Brushes.Black, lx + 28, ly + i * legendRowHeight - 2);
+}
+
+// 5. Save
+bmp.Save(outputFile, ImageFormat.Png);
+Console.WriteLine($"Pie chart saved: {Path.GetFullPath(outputFile)}");
+
+
+public class TimeEntry
+{
+    public string? Id { get; set; }
     public string? EmployeeName { get; set; }
-
-    [JsonPropertyName("StarTimeUtc")]
-    public DateTime StartTimeUtc { get; set; }
-
+    public DateTime StarTimeUtc { get; set; }   
     public DateTime EndTimeUtc { get; set; }
-
+    public string? EntryNotes { get; set; }
     public DateTime? DeletedOn { get; set; }
+}
+
+public static class SampleData
+{
+    public const string Json = """
+    [
+      { "Id": "1",  "EmployeeName": "Raja",   "StarTimeUtc": "2026-10-05T04:00:00Z", "EndTimeUtc": "2026-10-05T12:30:00Z", "EntryNotes": "Backend work", "DeletedOn": null },
+      { "Id": "2",  "EmployeeName": "Raja",   "StarTimeUtc": "2026-10-06T04:00:00Z", "EndTimeUtc": "2026-10-06T13:00:00Z", "EntryNotes": "Code review",  "DeletedOn": null },
+      { "Id": "3",  "EmployeeName": "Monica", "StarTimeUtc": "2026-10-05T05:00:00Z", "EndTimeUtc": "2026-10-05T11:00:00Z", "EntryNotes": "UI design",    "DeletedOn": null },
+      { "Id": "4",  "EmployeeName": "Monica", "StarTimeUtc": "2026-10-06T05:00:00Z", "EndTimeUtc": "2026-10-06T12:00:00Z", "EntryNotes": "Prototyping",  "DeletedOn": null },
+      { "Id": "5",  "EmployeeName": "Vijay",  "StarTimeUtc": "2026-10-05T03:30:00Z", "EndTimeUtc": "2026-10-05T14:00:00Z", "EntryNotes": "Deployment",   "DeletedOn": null },
+      { "Id": "6",  "EmployeeName": "Priya",  "StarTimeUtc": "2026-10-05T06:00:00Z", "EndTimeUtc": "2026-10-05T10:00:00Z", "EntryNotes": "Testing",      "DeletedOn": null },
+      { "Id": "7",  "EmployeeName": "Priya",  "StarTimeUtc": "2026-10-07T06:00:00Z", "EndTimeUtc": "2026-10-07T12:00:00Z", "EntryNotes": "QA",           "DeletedOn": null },
+      { "Id": "8",  "EmployeeName": "Arjun",  "StarTimeUtc": "2026-10-06T04:30:00Z", "EndTimeUtc": "2026-10-06T09:30:00Z", "EntryNotes": "Support",      "DeletedOn": null },
+      { "Id": "9",  "EmployeeName": "Kavya",  "StarTimeUtc": "2026-10-07T05:00:00Z", "EndTimeUtc": "2026-10-07T13:30:00Z", "EntryNotes": "Data analysis","DeletedOn": null },
+      { "Id": "10", "EmployeeName": "Vijay",  "StarTimeUtc": "2026-10-07T03:30:00Z", "EndTimeUtc": "2026-10-07T08:00:00Z", "EntryNotes": "Hotfix",       "DeletedOn": null }
+    ]
+    """;
 }
